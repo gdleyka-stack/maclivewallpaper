@@ -3,6 +3,28 @@ import Foundation
 import QuartzCore
 import AVFoundation
 
+extension NSImage {
+    func croppedToSquare() -> NSImage? {
+        let size = self.size
+        let side = min(size.width, size.height)
+        if side <= 0 { return nil }
+        
+        let x = (size.width - side) / 2
+        let y = (size.height - side) / 2
+        let cropRect = NSRect(x: x, y: y, width: side, height: side)
+        
+        let croppedImage = NSImage(size: NSSize(width: side, height: side))
+        croppedImage.lockFocus()
+        self.draw(in: NSRect(x: 0, y: 0, width: side, height: side),
+                  from: cropRect,
+                  operation: .copy,
+                  fraction: 1.0)
+        croppedImage.unlockFocus()
+        
+        return croppedImage
+    }
+}
+
 // MARK: - Persistence
 
 struct GalleryStore {
@@ -277,13 +299,14 @@ class SettingsView: NSView {
         speedLabel?.stringValue = String(format: "%.2f×", WallpaperPlayer.shared.playbackRate)
     }
 
-    private func row(y: CGFloat, h: CGFloat, title: String) -> NSView {
+    private func row(y: CGFloat, h: CGFloat, title: String, titleY: CGFloat? = nil) -> NSView {
         let v = NSView(frame: NSRect(x: 0, y: y, width: bounds.width, height: h))
         v.wantsLayer = true; v.layer?.cornerRadius = 12
         v.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
         let lbl = NSTextField(labelWithString: title)
         lbl.font = NSFont.systemFont(ofSize: 12, weight: .medium); lbl.textColor = .labelColor
-        lbl.frame = NSRect(x: 14, y: (h - 16) / 2, width: 140, height: 16)
+        let finalY = titleY ?? (h - 16) / 2
+        lbl.frame = NSRect(x: 14, y: finalY, width: 140, height: 16)
         v.addSubview(lbl)
         return v
     }
@@ -317,15 +340,15 @@ class SettingsView: NSView {
 
         // Speed
         y -= 72
-        let speedRow = row(y: y, h: 64, title: "Playback Speed")
+        let speedRow = row(y: y, h: 64, title: "Playback Speed", titleY: 38)
         let lbl = NSTextField(labelWithString: String(format: "%.2f×", wp.playbackRate))
         lbl.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
         lbl.textColor = .secondaryLabelColor; lbl.alignment = .right
-        lbl.frame = NSRect(x: W - 58, y: 36, width: 44, height: 16)
+        lbl.frame = NSRect(x: W - 58, y: 38, width: 44, height: 16)
         speedRow.addSubview(lbl)
         speedLabel = lbl
 
-        let slider = NSSlider(frame: NSRect(x: 14, y: 8, width: W - 28, height: 24))
+        let slider = NSSlider(frame: NSRect(x: 14, y: 10, width: W - 28, height: 20))
         slider.minValue = 0.25; slider.maxValue = 3.0
         slider.doubleValue = Double(wp.playbackRate)
         slider.isContinuous = true
@@ -417,16 +440,27 @@ class GalleryCardView: NSView {
         tb.addSubview(lbl); addSubview(tb)
 
         // Now-playing badge
-        let bw: CGFloat = 32
-        playingOverlay.frame = NSRect(x: (bounds.width - bw) / 2, y: (bounds.height - bw) / 2, width: bw, height: bw)
+        let bw: CGFloat = 36
+        playingOverlay.frame = NSRect(x: CGFloat(Int((bounds.width - bw) / 2)), y: CGFloat(Int((bounds.height - bw) / 2)), width: bw, height: bw)
         playingOverlay.wantsLayer = true; playingOverlay.layer?.cornerRadius = bw / 2
-        playingOverlay.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.85).cgColor
+        playingOverlay.layer?.masksToBounds = true
         playingOverlay.alphaValue = 0
-        if let iv = NSImageView(frame: NSRect(x: 7, y: 7, width: 18, height: 18)) as NSImageView? {
+
+        let ve = NSVisualEffectView(frame: playingOverlay.bounds)
+        ve.material = .hudWindow
+        ve.blendingMode = .withinWindow
+        ve.state = .active
+        ve.wantsLayer = true
+        ve.layer?.cornerRadius = bw / 2
+        ve.layer?.borderWidth = 1.0
+        ve.layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
+        playingOverlay.addSubview(ve)
+
+        if let iv = NSImageView(frame: NSRect(x: 10, y: 9, width: 18, height: 18)) as NSImageView? {
             let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
             iv.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
             iv.image?.isTemplate = true; iv.contentTintColor = .white
-            playingOverlay.addSubview(iv)
+            ve.addSubview(iv)
         }
         addSubview(playingOverlay)
 
@@ -650,6 +684,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var galleryView: GalleryView?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Set Dock Icon dynamically
+        if let iconURL = Bundle.main.url(forResource: "app_icon", withExtension: "webp"),
+           let image = NSImage(contentsOf: iconURL) {
+            NSApp.applicationIconImage = image.croppedToSquare() ?? image
+        }
+
         WallpaperPlayer.shared.loadSettings()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)

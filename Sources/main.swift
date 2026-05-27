@@ -1,614 +1,756 @@
 import AppKit
 import Foundation
 import QuartzCore
-import UniformTypeIdentifiers
 import AVFoundation
 
-// Custom vector drawing for the tray status item (Player play button)
-func createTrayIcon() -> NSImage {
-    if let symbolImage = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil) {
-        return symbolImage
+// MARK: - Persistence
+
+struct GalleryStore {
+    static let itemsKey = "gallery.items"
+    static let activeURLKey = "gallery.activeURL"
+
+    static func saveItems(_ items: [GalleryView.GalleryItem]) {
+        let bookmarks = items.compactMap { item -> Data? in
+            guard let url = item.videoURL else { return nil }
+            return try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        }
+        UserDefaults.standard.set(bookmarks, forKey: itemsKey)
     }
-    
+
+    static func loadItems() -> [URL] {
+        guard let bookmarks = UserDefaults.standard.array(forKey: itemsKey) as? [Data] else { return [] }
+        var isStale = false
+        return bookmarks.compactMap { data in
+            return try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale)
+        }
+    }
+
+    static func saveActiveURL(_ url: URL?) {
+        let bookmark = try? url?.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        UserDefaults.standard.set(bookmark, forKey: activeURLKey)
+    }
+
+    static func loadActiveURL() -> URL? {
+        guard let data = UserDefaults.standard.data(forKey: activeURLKey) else { return nil }
+        var isStale = false
+        return try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale)
+    }
+}
+
+// MARK: - Wallpaper Player (multi-screen)
+
+class WallpaperPlayer {
+    static let shared = WallpaperPlayer()
+
+    private var wallpaperWindows: [NSWindow] = []
+    private var player: AVPlayer?
+    private var playerLayers: [AVPlayerLayer] = []
+    private var currentURL: URL?
+    private var loopObserver: Any?
+
+    var soundEnabled: Bool = true {
+        didSet {
+            player?.isMuted = !soundEnabled
+            UserDefaults.standard.set(soundEnabled, forKey: "settings.sound")
+        }
+    }
+    var loopEnabled: Bool = true {
+        didSet { UserDefaults.standard.set(loopEnabled, forKey: "settings.loop") }
+    }
+    var playbackRate: Float = 1.0 {
+        didSet {
+            player?.rate = playbackRate
+            UserDefaults.standard.set(playbackRate, forKey: "settings.speed")
+        }
+    }
+
+    var nowPlayingURL: URL? { currentURL }
+
+    func loadSettings() {
+        let d = UserDefaults.standard
+        if d.object(forKey: "settings.sound") != nil {
+            soundEnabled = d.bool(forKey: "settings.sound")
+        }
+        if d.object(forKey: "settings.loop") != nil {
+            loopEnabled = d.bool(forKey: "settings.loop")
+        }
+        if d.object(forKey: "settings.speed") != nil {
+            playbackRate = d.float(forKey: "settings.speed")
+        }
+    }
+
+    func play(url: URL) {
+        if currentURL == url { stop(); return }
+        stop()
+        currentURL = url
+        GalleryStore.saveActiveURL(url)
+
+        let item = AVPlayerItem(url: url)
+        player = AVPlayer(playerItem: item)
+        player?.isMuted = !soundEnabled
+
+        // Create a wallpaper window for every connected screen
+        for screen in NSScreen.screens {
+            let win = makeWallpaperWindow(for: screen)
+            let layer = AVPlayerLayer(player: player)
+            layer.frame = win.contentView!.bounds
+            layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+            layer.videoGravity = .resizeAspectFill
+            win.contentView!.layer!.addSublayer(layer)
+            win.orderFront(nil)
+            wallpaperWindows.append(win)
+            playerLayers.append(layer)
+        }
+
+        if loopEnabled {
+            loopObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+            ) { [weak self] _ in
+                self?.player?.seek(to: .zero)
+                self?.player?.play()
+                self?.player?.rate = self?.playbackRate ?? 1.0
+            }
+        }
+
+        // Listen for screen changes
+        NotificationCenter.default.addObserver(self, selector: #selector(screensChanged),
+            name: NSApplication.didChangeScreenParametersNotification, object: nil)
+
+        player?.play()
+        player?.rate = playbackRate
+    }
+
+    func stop() {
+        if let obs = loopObserver { NotificationCenter.default.removeObserver(obs); loopObserver = nil }
+        NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        player?.pause()
+        player = nil
+        playerLayers.forEach { $0.removeFromSuperlayer() }
+        playerLayers.removeAll()
+        wallpaperWindows.forEach { $0.orderOut(nil) }
+        wallpaperWindows.removeAll()
+        currentURL = nil
+        GalleryStore.saveActiveURL(nil)
+    }
+
+    @objc private func screensChanged() {
+        guard let url = currentURL else { return }
+        play(url: url)   // re-setup windows for new screen configuration
+    }
+
+    private func makeWallpaperWindow(for screen: NSScreen) -> NSWindow {
+        let win = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        win.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
+        win.isOpaque = true
+        win.backgroundColor = .black
+        win.ignoresMouseEvents = true
+        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        win.contentView?.wantsLayer = true
+        win.contentView?.layer?.backgroundColor = NSColor.black.cgColor
+        return win
+    }
+}
+
+// MARK: - Tray Icon
+
+func createTrayIcon() -> NSImage {
+    if let img = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil) { return img }
     let size = NSSize(width: 18, height: 18)
-    let image = NSImage(size: size, flipped: false) { rect in
+    let image = NSImage(size: size, flipped: false) { _ in
         let path = NSBezierPath()
-        // Triangle pointing to the right
         path.move(to: NSPoint(x: 6, y: 4))
         path.line(to: NSPoint(x: 14, y: 9))
         path.line(to: NSPoint(x: 6, y: 14))
         path.close()
-        
-        NSColor.black.setFill()
-        path.fill()
-        
+        NSColor.black.setFill(); path.fill()
         return true
     }
     image.isTemplate = true
     return image
 }
 
-// Custom button with hover effect and white text (Quit Button)
+// MARK: - Quit Button
+
 class RedQuitButton: NSButton {
     private var trackingArea: NSTrackingArea?
-    
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setupButton()
+    override init(frame f: NSRect) { super.init(frame: f); setup() }
+    required init?(coder: NSCoder) { super.init(coder: coder); setup() }
+    private func setup() {
+        isBordered = false; wantsLayer = true; layer?.cornerRadius = 10
+        layer?.backgroundColor = NSColor(red: 0.85, green: 0.15, blue: 0.15, alpha: 0.9).cgColor
+        let p = NSMutableParagraphStyle(); p.alignment = .center
+        attributedTitle = NSAttributedString(string: "Quit Application", attributes: [
+            .foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 13, weight: .semibold), .paragraphStyle: p])
     }
-    
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setupButton()
-    }
-    
-    private func setupButton() {
-        self.isBordered = false
-        self.wantsLayer = true
-        self.layer?.cornerRadius = 10
-        self.layer?.backgroundColor = NSColor(red: 0.85, green: 0.15, blue: 0.15, alpha: 0.9).cgColor
-        
-        let pstyle = NSMutableParagraphStyle()
-        pstyle.alignment = .center
-        self.attributedTitle = NSAttributedString(string: "Quit Application", attributes: [
-            .foregroundColor: NSColor.white,
-            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-            .paragraphStyle: pstyle
-        ])
-    }
-    
     override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea = self.trackingArea {
-            self.removeTrackingArea(trackingArea)
-        }
-        let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeAlways]
-        let trackingArea = NSTrackingArea(rect: self.bounds, options: options, owner: self, userInfo: nil)
-        self.addTrackingArea(trackingArea)
-        self.trackingArea = trackingArea
+        super.updateTrackingAreas(); if let t = trackingArea { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self)
+        addTrackingArea(t); trackingArea = t
     }
-    
-    override func mouseEntered(with event: NSEvent) {
-        super.mouseEntered(with: event)
-        NSCursor.pointingHand.set()
-        self.layer?.backgroundColor = NSColor(red: 0.95, green: 0.2, blue: 0.2, alpha: 1.0).cgColor
-    }
-    
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        NSCursor.arrow.set()
-        self.layer?.backgroundColor = NSColor(red: 0.85, green: 0.15, blue: 0.15, alpha: 0.9).cgColor
-    }
+    override func mouseEntered(with e: NSEvent) { super.mouseEntered(with: e); NSCursor.pointingHand.set()
+        layer?.backgroundColor = NSColor(red: 0.95, green: 0.2, blue: 0.2, alpha: 1).cgColor }
+    override func mouseExited(with e: NSEvent) { super.mouseExited(with: e); NSCursor.arrow.set()
+        layer?.backgroundColor = NSColor(red: 0.85, green: 0.15, blue: 0.15, alpha: 0.9).cgColor }
 }
 
-// Premium Capsule Segmented Control
-class CustomSegmentedControl: NSView {
-    var segmentChangedHandler: ((Int) -> Void)?
-    private var selectedIndex: Int = 0
-    
-    private let selectionIndicator = NSView()
-    private let button1 = NSButton()
-    private let button2 = NSButton()
-    
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setupUI()
-    }
-    
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setupUI()
-    }
-    
-    private func setupUI() {
+// Custom Toggle Switch removed; using standard NSSwitch
+
+// MARK: - Custom Tab Bar (two pill buttons, not segment)
+
+class TabBar: NSView {
+    var selectedIndex: Int = 0 { didSet { updateSelection(animated: true) } }
+    var changed: ((Int) -> Void)?
+    private let bg = NSView()
+    private let pill = NSView()
+    private let btn1 = NSButton()
+    private let btn2 = NSButton()
+
+    override init(frame: NSRect) { super.init(frame: frame); setup() }
+    required init?(coder: NSCoder) { super.init(coder: coder); setup() }
+
+    private func setup() {
         wantsLayer = true
-        layer?.cornerRadius = 17
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
-        
-        // Selection Indicator (sliding background capsule)
-        selectionIndicator.wantsLayer = true
-        selectionIndicator.layer?.cornerRadius = 14
-        selectionIndicator.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.08).cgColor
-        addSubview(selectionIndicator)
-        
-        // Buttons
-        setupButton(button1, title: "Settings", index: 0)
-        setupButton(button2, title: "Gallery", index: 1)
-        
+        bg.wantsLayer = true; bg.layer?.cornerRadius = 14
+        bg.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+        bg.frame = bounds; addSubview(bg)
+
+        pill.wantsLayer = true; pill.layer?.cornerRadius = 11
+        pill.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
+        addSubview(pill)
+
+        for (i, (btn, title)) in [(btn1, "Settings"), (btn2, "Gallery")].enumerated() {
+            btn.isBordered = false; btn.wantsLayer = true
+            btn.title = title; btn.tag = i
+            btn.target = self; btn.action = #selector(btnTapped(_:))
+            addSubview(btn)
+        }
         updateSelection(animated: false)
     }
-    
-    private func setupButton(_ button: NSButton, title: String, index: Int) {
-        button.isBordered = false
-        button.title = ""
-        button.wantsLayer = true
-        
-        button.target = self
-        button.action = #selector(buttonClicked(_:))
-        button.tag = index
-        addSubview(button)
-    }
-    
+
     override func layout() {
         super.layout()
-        let btnWidth = bounds.width / 2
-        button1.frame = NSRect(x: 0, y: 0, width: btnWidth, height: bounds.height)
-        button2.frame = NSRect(x: btnWidth, y: 0, width: btnWidth, height: bounds.height)
+        bg.frame = bounds
+        let w = bounds.width / 2
+        btn1.frame = NSRect(x: 0, y: 0, width: w, height: bounds.height)
+        btn2.frame = NSRect(x: w, y: 0, width: w, height: bounds.height)
         updateSelection(animated: false)
     }
-    
-    @objc private func buttonClicked(_ sender: NSButton) {
-        let index = sender.tag
-        if index != selectedIndex {
-            selectedIndex = index
-            updateSelection(animated: true)
-            segmentChangedHandler?(selectedIndex)
-        }
+
+    @objc private func btnTapped(_ sender: NSButton) {
+        if sender.tag != selectedIndex { selectedIndex = sender.tag; changed?(selectedIndex) }
     }
-    
+
     private func updateSelection(animated: Bool) {
-        let btnWidth = bounds.width / 2
-        let indicatorFrame = NSRect(x: CGFloat(selectedIndex) * btnWidth + 3, y: 3, width: btnWidth - 6, height: bounds.height - 6)
-        
-        let pstyle = NSMutableParagraphStyle()
-        pstyle.alignment = .center
-        
-        let activeAttrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor.labelColor,
-            .font: NSFont.systemFont(ofSize: 13, weight: .bold),
-            .paragraphStyle: pstyle
-        ]
-        let inactiveAttrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor.secondaryLabelColor,
-            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-            .paragraphStyle: pstyle
-        ]
-        
-        button1.attributedTitle = NSAttributedString(string: "Settings", attributes: selectedIndex == 0 ? activeAttrs : inactiveAttrs)
-        button2.attributedTitle = NSAttributedString(string: "Gallery", attributes: selectedIndex == 1 ? activeAttrs : inactiveAttrs)
-        
+        let w = bounds.width / 2
+        let pillFrame = NSRect(x: CGFloat(selectedIndex) * w + 3, y: 3, width: w - 6, height: bounds.height - 6)
+        let p = NSMutableParagraphStyle(); p.alignment = .center
+        let active: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.labelColor,
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold), .paragraphStyle: p]
+        let inactive: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.tertiaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium), .paragraphStyle: p]
+        btn1.attributedTitle = NSAttributedString(string: "Settings", attributes: selectedIndex == 0 ? active : inactive)
+        btn2.attributedTitle = NSAttributedString(string: "Gallery", attributes: selectedIndex == 1 ? active : inactive)
         if animated {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.22
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                selectionIndicator.animator().frame = indicatorFrame
+            NSAnimationContext.runAnimationGroup {
+                $0.duration = 0.2; $0.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                pill.animator().frame = pillFrame
             }
-        } else {
-            selectionIndicator.frame = indicatorFrame
-        }
+        } else { pill.frame = pillFrame }
     }
 }
 
-// Empty placeholder view for Settings
+// MARK: - Settings View
+
 class SettingsView: NSView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    private var soundToggle: NSSwitch?
+    private var loopToggle: NSSwitch?
+    private var speedSlider: NSSlider?
+    private var speedLabel: NSTextField?
+
+    override init(frame: NSRect) { super.init(frame: frame); setup() }
+    required init?(coder: NSCoder) { super.init(coder: coder); setup() }
+
+    func syncToPlayer() {
+        soundToggle?.state = WallpaperPlayer.shared.soundEnabled ? .on : .off
+        loopToggle?.state = WallpaperPlayer.shared.loopEnabled ? .on : .off
+        speedSlider?.doubleValue = Double(WallpaperPlayer.shared.playbackRate)
+        speedLabel?.stringValue = String(format: "%.2f×", WallpaperPlayer.shared.playbackRate)
     }
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
+
+    private func row(y: CGFloat, h: CGFloat, title: String) -> NSView {
+        let v = NSView(frame: NSRect(x: 0, y: y, width: bounds.width, height: h))
+        v.wantsLayer = true; v.layer?.cornerRadius = 12
+        v.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
+        let lbl = NSTextField(labelWithString: title)
+        lbl.font = NSFont.systemFont(ofSize: 12, weight: .medium); lbl.textColor = .labelColor
+        lbl.frame = NSRect(x: 14, y: (h - 16) / 2, width: 140, height: 16)
+        v.addSubview(lbl)
+        return v
+    }
+
+    private func setup() {
+        let W = bounds.width
+        let wp = WallpaperPlayer.shared
+        var y = bounds.height
+
+        // Sound
+        y -= 52
+        let soundRow = row(y: y, h: 44, title: "Sound")
+        let sndT = NSSwitch(frame: NSRect(x: W - 54, y: 11, width: 40, height: 22))
+        sndT.state = wp.soundEnabled ? .on : .off
+        sndT.target = self
+        sndT.action = #selector(soundToggled(_:))
+        soundRow.addSubview(sndT)
+        addSubview(soundRow)
+        soundToggle = sndT
+
+        // Loop
+        y -= 52
+        let loopRow = row(y: y, h: 44, title: "Loop")
+        let lpT = NSSwitch(frame: NSRect(x: W - 54, y: 11, width: 40, height: 22))
+        lpT.state = wp.loopEnabled ? .on : .off
+        lpT.target = self
+        lpT.action = #selector(loopToggled(_:))
+        loopRow.addSubview(lpT)
+        addSubview(loopRow)
+        loopToggle = lpT
+
+        // Speed
+        y -= 72
+        let speedRow = row(y: y, h: 64, title: "Playback Speed")
+        let lbl = NSTextField(labelWithString: String(format: "%.2f×", wp.playbackRate))
+        lbl.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+        lbl.textColor = .secondaryLabelColor; lbl.alignment = .right
+        lbl.frame = NSRect(x: W - 58, y: 36, width: 44, height: 16)
+        speedRow.addSubview(lbl)
+        speedLabel = lbl
+
+        let slider = NSSlider(frame: NSRect(x: 14, y: 8, width: W - 28, height: 24))
+        slider.minValue = 0.25; slider.maxValue = 3.0
+        slider.doubleValue = Double(wp.playbackRate)
+        slider.isContinuous = true
+        slider.target = self; slider.action = #selector(speedChanged(_:))
+        speedRow.addSubview(slider)
+        addSubview(speedRow)
+        speedSlider = slider
+    }
+
+    @objc private func soundToggled(_ s: NSSwitch) {
+        WallpaperPlayer.shared.soundEnabled = (s.state == .on)
+    }
+
+    @objc private func loopToggled(_ s: NSSwitch) {
+        WallpaperPlayer.shared.loopEnabled = (s.state == .on)
+    }
+
+    @objc private func speedChanged(_ s: NSSlider) {
+        WallpaperPlayer.shared.playbackRate = Float(s.doubleValue)
+        speedLabel?.stringValue = String(format: "%.2f×", s.doubleValue)
     }
 }
 
-// Minimalist, borderless white button with subtle border on hover for adding videos
-class MinimalAddButton: NSButton {
+// MARK: - Card Icon Button (square)
+
+class CardIconButton: NSButton {
     private var trackingArea: NSTrackingArea?
-    
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setupButton()
-    }
-    
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setupButton()
-    }
-    
-    private func setupButton() {
-        self.isBordered = false
-        self.wantsLayer = true
-        self.layer?.cornerRadius = 8
-        self.layer?.borderWidth = 1.0
-        self.layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
-        self.layer?.backgroundColor = NSColor.clear.cgColor
-        
-        let pstyle = NSMutableParagraphStyle()
-        pstyle.alignment = .center
-        self.attributedTitle = NSAttributedString(string: "+ Add Video", attributes: [
-            .foregroundColor: NSColor.white.withAlphaComponent(0.75),
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-            .paragraphStyle: pstyle
-        ])
-    }
-    
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea = self.trackingArea {
-            self.removeTrackingArea(trackingArea)
+    init(frame: NSRect, sym: String, color: NSColor = .white) {
+        super.init(frame: frame); isBordered = false; wantsLayer = true
+        layer?.cornerRadius = 5
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+        if let img = NSImage(systemSymbolName: sym, accessibilityDescription: nil) {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+            image = img.withSymbolConfiguration(cfg); image?.isTemplate = true; contentTintColor = color
         }
-        let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeAlways]
-        let trackingArea = NSTrackingArea(rect: self.bounds, options: options, owner: self, userInfo: nil)
-        self.addTrackingArea(trackingArea)
-        self.trackingArea = trackingArea
     }
-    
-    override func mouseEntered(with event: NSEvent) {
-        super.mouseEntered(with: event)
-        NSCursor.pointingHand.set()
-        self.layer?.borderColor = NSColor.white.withAlphaComponent(0.6).cgColor
-        self.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.06).cgColor
-        
-        let pstyle = NSMutableParagraphStyle()
-        pstyle.alignment = .center
-        self.attributedTitle = NSAttributedString(string: "+ Add Video", attributes: [
-            .foregroundColor: NSColor.white,
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-            .paragraphStyle: pstyle
-        ])
+    required init?(coder: NSCoder) { fatalError() }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas(); if let t = trackingArea { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self)
+        addTrackingArea(t); trackingArea = t
     }
-    
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        NSCursor.arrow.set()
-        self.layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
-        self.layer?.backgroundColor = NSColor.clear.cgColor
-        
-        let pstyle = NSMutableParagraphStyle()
-        pstyle.alignment = .center
-        self.attributedTitle = NSAttributedString(string: "+ Add Video", attributes: [
-            .foregroundColor: NSColor.white.withAlphaComponent(0.75),
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-            .paragraphStyle: pstyle
-        ])
+    override func mouseEntered(with e: NSEvent) { super.mouseEntered(with: e)
+        NSCursor.pointingHand.set(); layer?.backgroundColor = NSColor.black.withAlphaComponent(0.85).cgColor }
+    override func mouseExited(with e: NSEvent) { super.mouseExited(with: e)
+        NSCursor.arrow.set(); layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor }
+}
+
+// MARK: - Gallery Card
+
+class GalleryCardView: NSView {
+    private var tracking: NSTrackingArea?
+    let item: GalleryView.GalleryItem
+    var onDelete: (() -> Void)?
+    var onShowInFinder: (() -> Void)?
+    var onTap: (() -> Void)?
+    private let deleteBtn: CardIconButton
+    private let finderBtn: CardIconButton
+    private let playingOverlay = NSView()
+    private(set) var isPlaying = false
+
+    init(frame: NSRect, item: GalleryView.GalleryItem) {
+        self.item = item
+        let w = frame.width, h = frame.height
+        deleteBtn = CardIconButton(frame: NSRect(x: w - 24, y: h - 24, width: 20, height: 20), sym: "xmark", color: .systemRed)
+        finderBtn = CardIconButton(frame: NSRect(x: w - 48, y: h - 24, width: 20, height: 20), sym: "folder.fill")
+        super.init(frame: frame)
+        setupUI()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setupUI() {
+        wantsLayer = true; layer?.cornerRadius = 10; layer?.masksToBounds = true
+        if let t = item.thumbnail, let cg = t.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            layer?.contents = cg; layer?.contentsGravity = .resizeAspectFill
+        } else {
+            let g = CAGradientLayer(); g.frame = bounds
+            g.colors = item.colors.map { $0.cgColor }
+            g.startPoint = CGPoint(x: 0, y: 0); g.endPoint = CGPoint(x: 1, y: 1)
+            layer?.addSublayer(g)
+        }
+        // Title bar
+        let tb = NSView(frame: NSRect(x: 0, y: 0, width: bounds.width, height: 28))
+        tb.wantsLayer = true; tb.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.4).cgColor
+        let lbl = NSTextField(labelWithString: item.title)
+        lbl.font = NSFont.systemFont(ofSize: 9, weight: .semibold); lbl.textColor = .white
+        lbl.alignment = .center; lbl.lineBreakMode = .byTruncatingMiddle
+        lbl.frame = NSRect(x: 4, y: 5, width: bounds.width - 8, height: 16)
+        tb.addSubview(lbl); addSubview(tb)
+
+        // Now-playing badge
+        let bw: CGFloat = 32
+        playingOverlay.frame = NSRect(x: (bounds.width - bw) / 2, y: (bounds.height - bw) / 2, width: bw, height: bw)
+        playingOverlay.wantsLayer = true; playingOverlay.layer?.cornerRadius = bw / 2
+        playingOverlay.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.85).cgColor
+        playingOverlay.alphaValue = 0
+        if let iv = NSImageView(frame: NSRect(x: 7, y: 7, width: 18, height: 18)) as NSImageView? {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+            iv.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
+            iv.image?.isTemplate = true; iv.contentTintColor = .white
+            playingOverlay.addSubview(iv)
+        }
+        addSubview(playingOverlay)
+
+        // Hover buttons
+        [deleteBtn, finderBtn].forEach { $0.alphaValue = 0 }
+        deleteBtn.target = self; deleteBtn.action = #selector(delTapped)
+        finderBtn.target = self; finderBtn.action = #selector(finderTapped)
+        addSubview(deleteBtn)
+        if item.videoURL != nil { addSubview(finderBtn) }
+    }
+
+    func setPlaying(_ on: Bool) {
+        isPlaying = on
+        NSAnimationContext.runAnimationGroup { $0.duration = 0.2; playingOverlay.animator().alphaValue = on ? 1 : 0 }
+    }
+
+    @objc private func delTapped() { onDelete?() }
+    @objc private func finderTapped() { onShowInFinder?() }
+
+    override func mouseDown(with e: NSEvent) { onTap?() }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas(); if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self)
+        addTrackingArea(t); tracking = t
+    }
+    override func mouseEntered(with e: NSEvent) {
+        super.mouseEntered(with: e)
+        NSAnimationContext.runAnimationGroup { $0.duration = 0.15
+            deleteBtn.animator().alphaValue = 1; finderBtn.animator().alphaValue = 1 }
+    }
+    override func mouseExited(with e: NSEvent) {
+        super.mouseExited(with: e)
+        NSAnimationContext.runAnimationGroup { $0.duration = 0.15
+            deleteBtn.animator().alphaValue = 0; finderBtn.animator().alphaValue = 0 }
     }
 }
 
-// Scrollable Gallery with an Add Video button at the bottom and max 2 cells per row
+// MARK: - Gallery View
+
 class GalleryView: NSView {
-    private let scrollView = NSScrollView()
-    private let documentView = NSView()
-    private let addButton = MinimalAddButton()
-    
     struct GalleryItem {
         let title: String
         let colors: [NSColor]
         let videoURL: URL?
         let thumbnail: NSImage?
     }
-    
-    private var items: [GalleryItem] = []
-    
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setupUI()
-    }
-    
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setupUI()
-    }
-    
-    private func setupUI() {
-        // 1. Add Video Button
-        addButton.frame = NSRect(x: (bounds.width - 110) / 2, y: 8, width: 110, height: 26)
-        addButton.target = self
-        addButton.action = #selector(addVideoClicked)
-        addSubview(addButton)
-        
-        // 2. Scroll View
+
+    private let scrollView = NSScrollView()
+    private let docView = NSView()
+    private let addBtn = MinimalAddButton()
+    private(set) var items: [GalleryItem] = []
+    private var cards: [GalleryCardView] = []
+
+    override init(frame: NSRect) { super.init(frame: frame); setup() }
+    required init?(coder: NSCoder) { super.init(coder: coder); setup() }
+
+    private func setup() {
+        addBtn.frame = NSRect(x: (bounds.width - 110) / 2, y: 8, width: 110, height: 26)
+        addBtn.target = self; addBtn.action = #selector(addTapped)
+        addSubview(addBtn)
+
         scrollView.frame = NSRect(x: 0, y: 42, width: bounds.width, height: bounds.height - 42)
-        scrollView.hasVerticalScroller = true
-        scrollView.drawsBackground = false
-        scrollView.documentView = documentView
-        
-        addSubview(scrollView)
-        
-        layoutGallery()
+        scrollView.hasVerticalScroller = true; scrollView.drawsBackground = false
+        scrollView.documentView = docView; addSubview(scrollView)
     }
-    
-    private func generateThumbnail(for url: URL) -> NSImage? {
-        let asset = AVAsset(url: url)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        let time = CMTime(seconds: 1.0, preferredTimescale: 600)
-        do {
-            let imageRef = try generator.copyCGImage(at: time, actualTime: nil)
-            return NSImage(cgImage: imageRef, size: NSZeroSize)
-        } catch {
-            do {
-                let imageRef = try generator.copyCGImage(at: .zero, actualTime: nil)
-                return NSImage(cgImage: imageRef, size: NSZeroSize)
-            } catch {
-                return nil
+
+    func loadSavedItems() {
+        let urls = GalleryStore.loadItems()
+        for url in urls {
+            // Using bookmarks so we bypass fileExists(atPath:) issues where paths get sandbox-blocked
+            let thumb = makeThumbnail(url: url)
+            let colors = randomColors()
+            items.append(GalleryItem(title: url.lastPathComponent, colors: colors, videoURL: url, thumbnail: thumb))
+        }
+        layout()
+        refreshPlayingState()
+    }
+
+    func addItem(url: URL) {
+        let thumb = makeThumbnail(url: url)
+        items.append(GalleryItem(title: url.lastPathComponent, colors: randomColors(), videoURL: url, thumbnail: thumb))
+        GalleryStore.saveItems(items)
+        layout()
+        refreshPlayingState()
+    }
+
+    private func randomColors() -> [NSColor] {
+        (0..<2).map { _ in NSColor(red: CGFloat.random(in: 0.2...0.8), green: CGFloat.random(in: 0.2...0.8), blue: CGFloat.random(in: 0.2...0.8), alpha: 1) }
+    }
+
+    private func makeThumbnail(url: URL) -> NSImage? {
+        let asset = AVURLAsset(url: url)
+        let gen = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform = true
+        for t in [1.0, 0.0] {
+            if let cg = try? gen.copyCGImage(at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil) {
+                return NSImage(cgImage: cg, size: .zero)
             }
         }
+        return nil
     }
-    
-    @objc private func addVideoClicked() {
-        let openPanel = NSOpenPanel()
-        openPanel.title = "Select Video File"
-        openPanel.allowsMultipleSelection = false
-        openPanel.canChooseDirectories = false
-        openPanel.canChooseFiles = true
-        
-        // Force the app to become active so the file dialog gets focus and comes to front
+
+    @objc private func addTapped() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Video"; panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false; panel.canChooseFiles = true
         NSApp.activate(ignoringOtherApps: true)
-        
-        let response = openPanel.runModal()
-        if response == .OK, let url = openPanel.url {
-            let filename = url.lastPathComponent
-            let colors: [NSColor] = [
-                NSColor(red: CGFloat.random(in: 0.2...0.8), green: CGFloat.random(in: 0.2...0.8), blue: CGFloat.random(in: 0.2...0.8), alpha: 1.0),
-                NSColor(red: CGFloat.random(in: 0.2...0.8), green: CGFloat.random(in: 0.2...0.8), blue: CGFloat.random(in: 0.2...0.8), alpha: 1.0)
-            ]
-            let thumbnail = generateThumbnail(for: url)
-            let newItem = GalleryItem(title: filename, colors: colors, videoURL: url, thumbnail: thumbnail)
-            self.items.append(newItem)
-            self.layoutGallery()
-        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        addItem(url: url)
     }
-    
-    private func layoutGallery() {
-        documentView.subviews.forEach { $0.removeFromSuperview() }
-        
-        let availableWidth = scrollView.contentSize.width
-        let cardWidth: CGFloat = 110
-        let cardHeight: CGFloat = 90
-        let gap: CGFloat = 12
-        let columnsCount = 2
-        
-        let totalItems = items.count
-        let rowsCount = Int(ceil(Double(totalItems) / Double(columnsCount)))
-        
-        let contentHeight = max(scrollView.contentSize.height, CGFloat(rowsCount) * (cardHeight + gap) + gap)
-        documentView.frame = NSRect(x: 0, y: 0, width: availableWidth, height: contentHeight)
-        
-        for i in 0..<totalItems {
-            let col = i % columnsCount
-            let row = i / columnsCount
-            
-            let leftOffset = (availableWidth - (CGFloat(columnsCount) * cardWidth + CGFloat(columnsCount - 1) * gap)) / 2
-            let x = leftOffset + CGFloat(col) * (cardWidth + gap)
-            let y = contentHeight - cardHeight - gap - CGFloat(row) * (cardHeight + gap)
-            
-            let card = NSView(frame: NSRect(x: x, y: y, width: cardWidth, height: cardHeight))
-            card.wantsLayer = true
-            card.layer?.cornerRadius = 10
-            card.layer?.masksToBounds = true
-            
-            if let thumbnail = items[i].thumbnail,
-               let cgImage = thumbnail.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                card.layer?.contents = cgImage
-                card.layer?.contentsGravity = .resizeAspectFill
-            } else {
-                let gradient = CAGradientLayer()
-                gradient.frame = card.bounds
-                gradient.colors = items[i].colors.map { $0.cgColor }
-                gradient.startPoint = CGPoint(x: 0, y: 0)
-                gradient.endPoint = CGPoint(x: 1, y: 1)
-                card.layer?.addSublayer(gradient)
+
+    func refreshPlayingState() {
+        let nowURL = WallpaperPlayer.shared.nowPlayingURL
+        cards.forEach { $0.setPlaying($0.item.videoURL == nowURL && nowURL != nil) }
+    }
+
+    override func layout() {
+        super.layout()
+        docView.subviews.forEach { $0.removeFromSuperview() }
+        cards.removeAll()
+        let aw = scrollView.contentSize.width
+        let cw: CGFloat = 116, ch: CGFloat = 95, gap: CGFloat = 10, cols = 2
+        let rows = max(1, Int(ceil(Double(items.count) / Double(cols))))
+        let contentH = max(scrollView.contentSize.height, CGFloat(rows) * (ch + gap) + gap)
+        docView.frame = NSRect(x: 0, y: 0, width: aw, height: contentH)
+
+        for (i, item) in items.enumerated() {
+            let col = i % cols, row = i / cols
+            let lx = (aw - (CGFloat(cols) * cw + CGFloat(cols - 1) * gap)) / 2
+            let x = lx + CGFloat(col) * (cw + gap)
+            let y = contentH - ch - gap - CGFloat(row) * (ch + gap)
+            let card = GalleryCardView(frame: NSRect(x: x, y: y, width: cw, height: ch), item: item)
+            let idx = i
+            card.onTap = { [weak self] in
+                guard let self = self else { return }
+                if let url = self.items[idx].videoURL {
+                    WallpaperPlayer.shared.play(url: url)
+                }
+                self.refreshPlayingState()
             }
-            
-            let textBg = NSView(frame: NSRect(x: 0, y: 0, width: cardWidth, height: 34))
-            textBg.wantsLayer = true
-            textBg.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
-            
-            let label = NSTextField(labelWithString: items[i].title)
-            label.font = NSFont.systemFont(ofSize: 10, weight: .bold)
-            label.textColor = .white
-            label.alignment = .center
-            label.lineBreakMode = .byTruncatingMiddle
-            label.cell?.wraps = true
-            label.cell?.isScrollable = false
-            label.frame = NSRect(x: 4, y: 4, width: cardWidth - 8, height: 26)
-            textBg.addSubview(label)
-            
-            card.addSubview(textBg)
-            documentView.addSubview(card)
+            card.onDelete = { [weak self] in
+                guard let self = self else { return }
+                if let url = self.items[idx].videoURL, WallpaperPlayer.shared.nowPlayingURL == url {
+                    WallpaperPlayer.shared.stop()
+                }
+                self.items.remove(at: idx)
+                GalleryStore.saveItems(self.items)
+                self.layout()
+            }
+            card.onShowInFinder = {
+                if let url = item.videoURL { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            }
+            docView.addSubview(card); cards.append(card)
         }
-        
-        if contentHeight > scrollView.contentSize.height {
-            documentView.scroll(NSPoint(x: 0, y: contentHeight - scrollView.contentSize.height))
-        }
+        refreshPlayingState()
     }
 }
 
-// Custom panel acting as a floating popup window
-class MainWindow: NSPanel, NSWindowDelegate {
-    var lastResignTime: TimeInterval = 0
-    
-    init(contentRect: NSRect) {
-        super.init(
-            contentRect: contentRect,
-            styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        self.isReleasedWhenClosed = false
-        self.delegate = self
-        self.isMovableByWindowBackground = false
-        self.backgroundColor = .clear
-        self.hasShadow = true
+// MARK: - Minimal Add Button
+
+class MinimalAddButton: NSButton {
+    private var tracking: NSTrackingArea?
+    override init(frame: NSRect) { super.init(frame: frame); setup() }
+    required init?(coder: NSCoder) { super.init(coder: coder); setup() }
+    private func setup() {
+        isBordered = false; wantsLayer = true
+        layer?.cornerRadius = 8; layer?.borderWidth = 1
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
+        let p = NSMutableParagraphStyle(); p.alignment = .center
+        attributedTitle = NSAttributedString(string: "+ Add Video", attributes: [
+            .foregroundColor: NSColor.white.withAlphaComponent(0.75),
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium), .paragraphStyle: p])
     }
-    
-    override var canBecomeKey: Bool {
-        return true
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas(); if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self)
+        addTrackingArea(t); tracking = t
     }
-    
-    override var canBecomeMain: Bool {
-        return true
+    override func mouseEntered(with e: NSEvent) { super.mouseEntered(with: e)
+        NSCursor.pointingHand.set()
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.6).cgColor
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.06).cgColor
+        let p = NSMutableParagraphStyle(); p.alignment = .center
+        attributedTitle = NSAttributedString(string: "+ Add Video", attributes: [
+            .foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .paragraphStyle: p])
     }
-    
-    func windowDidResignKey(_ notification: Notification) {
-        lastResignTime = ProcessInfo.processInfo.systemUptime
-        self.orderOut(nil)
+    override func mouseExited(with e: NSEvent) { super.mouseExited(with: e)
+        NSCursor.arrow.set()
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
+        let p = NSMutableParagraphStyle(); p.alignment = .center
+        attributedTitle = NSAttributedString(string: "+ Add Video", attributes: [
+            .foregroundColor: NSColor.white.withAlphaComponent(0.75),
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium), .paragraphStyle: p])
     }
 }
+
+// MARK: - Main Window
+
+class MainWindow: NSPanel, NSWindowDelegate {
+    var lastResignTime: TimeInterval = 0
+    init(contentRect: NSRect) {
+        super.init(contentRect: contentRect, styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView], backing: .buffered, defer: false)
+        isReleasedWhenClosed = false; delegate = self
+        isMovableByWindowBackground = false; backgroundColor = .clear; hasShadow = true
+    }
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+    func windowDidResignKey(_ notification: Notification) {
+        lastResignTime = ProcessInfo.processInfo.systemUptime; orderOut(nil)
+    }
+}
+
+// MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var window: MainWindow?
-    
-    var contentContainer: NSView?
     var settingsView: SettingsView?
     var galleryView: GalleryView?
-    
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Create the status bar item (tray)
+        WallpaperPlayer.shared.loadSettings()
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem?.button {
-            button.image = createTrayIcon()
-            button.action = #selector(statusBarButtonClicked(_:))
-            button.target = self
+        if let btn = statusItem?.button {
+            btn.image = createTrayIcon()
+            btn.action = #selector(trayClicked(_:)); btn.target = self
         }
-        
         setupWindow()
-        
-        // Ensure it runs as a foreground app showing in Dock
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        
-        // Position window near tray initially
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.showWindowNearTray()
+            self.galleryView?.loadSavedItems()
+            // Auto-restore last wallpaper
+            if let url = GalleryStore.loadActiveURL() {
+                WallpaperPlayer.shared.play(url: url)
+                self.galleryView?.refreshPlayingState()
+            }
+            self.showNearTray()
         }
     }
-    
+
     func setupWindow() {
-        let windowWidth: CGFloat = 300
-        let windowHeight: CGFloat = 380
-        
-        let panel = MainWindow(contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight))
-        
-        // Vibrancy (frosted glass) background
-        let visualEffect = NSVisualEffectView(frame: panel.contentView!.bounds)
-        visualEffect.autoresizingMask = [.width, .height]
-        visualEffect.state = .active
-        visualEffect.material = .hudWindow
-        visualEffect.blendingMode = .behindWindow
-        visualEffect.wantsLayer = true
-        visualEffect.layer?.cornerRadius = 16
-        visualEffect.layer?.masksToBounds = true
-        panel.contentView?.addSubview(visualEffect)
-        
-        // Custom Capsule Segmented Control (Tabs)
-        let segment = CustomSegmentedControl(frame: NSRect(x: 20, y: windowHeight - 60, width: windowWidth - 40, height: 34))
-        segment.segmentChangedHandler = { [weak self] index in
-            self?.segmentChanged(index)
-        }
-        visualEffect.addSubview(segment)
-        
-        // Content Container
-        let container = NSView(frame: NSRect(x: 20, y: 75, width: windowWidth - 40, height: windowHeight - 60 - 75 - 10))
-        visualEffect.addSubview(container)
-        self.contentContainer = container
-        
-        // Add Subviews
+        let W: CGFloat = 300, H: CGFloat = 400
+        let panel = MainWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H))
+
+        let fx = NSVisualEffectView(frame: panel.contentView!.bounds)
+        fx.autoresizingMask = [.width, .height]; fx.state = .active
+        fx.material = .hudWindow; fx.blendingMode = .behindWindow
+        fx.wantsLayer = true; fx.layer?.cornerRadius = 18; fx.layer?.masksToBounds = true
+        panel.contentView?.addSubview(fx)
+
+        // Tab bar
+        let tabs = TabBar(frame: NSRect(x: 20, y: H - 62, width: W - 40, height: 34))
+        tabs.changed = { [weak self] i in self?.switchTab(i) }
+        fx.addSubview(tabs)
+
+        // Divider
+        let div = NSView(frame: NSRect(x: 20, y: H - 68, width: W - 40, height: 1))
+        div.wantsLayer = true; div.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        fx.addSubview(div)
+
+        // Content
+        let container = NSView(frame: NSRect(x: 20, y: 72, width: W - 40, height: H - 68 - 72 - 4))
+        fx.addSubview(container)
+
         let settings = SettingsView(frame: container.bounds)
         let gallery = GalleryView(frame: container.bounds)
         gallery.isHidden = true
-        
-        container.addSubview(settings)
-        container.addSubview(gallery)
-        
-        self.settingsView = settings
-        self.galleryView = gallery
-        
-        // Red Quit Button
-        let quitButton = RedQuitButton(frame: NSRect(x: 20, y: 20, width: windowWidth - 40, height: 40))
-        quitButton.target = self
-        quitButton.action = #selector(quitClicked(_:))
-        visualEffect.addSubview(quitButton)
-        
+        container.addSubview(settings); container.addSubview(gallery)
+        settingsView = settings; galleryView = gallery
+
+        // Quit button
+        let quit = RedQuitButton(frame: NSRect(x: 20, y: 20, width: W - 40, height: 40))
+        quit.target = self; quit.action = #selector(quitClicked(_:))
+        fx.addSubview(quit)
+
         self.window = panel
     }
-    
-    func segmentChanged(_ index: Int) {
-        if index == 0 {
-            settingsView?.isHidden = false
-            galleryView?.isHidden = true
-        } else {
-            settingsView?.isHidden = true
-            galleryView?.isHidden = false
-        }
+
+    func switchTab(_ i: Int) {
+        settingsView?.isHidden = i != 0
+        galleryView?.isHidden = i != 1
+        if i == 0 { settingsView?.syncToPlayer() }
     }
-    
-    @objc func statusBarButtonClicked(_ sender: AnyObject?) {
-        toggleWindow()
-    }
-    
-    @objc func quitClicked(_ sender: AnyObject?) {
-        NSApp.terminate(nil)
-    }
-    
+
+    @objc func trayClicked(_ sender: AnyObject?) { toggleWindow() }
+    @objc func quitClicked(_ sender: AnyObject?) { NSApp.terminate(nil) }
+
     func toggleWindow() {
-        guard let window = self.window else { return }
-        
+        guard let w = window else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        // Avoid reopening immediately if it was closed via loss of focus
-        if now - window.lastResignTime < 0.25 {
-            return
-        }
-        
-        if window.isVisible {
-            window.orderOut(nil)
-        } else {
-            showWindowNearTray()
-        }
+        if now - w.lastResignTime < 0.25 { return }
+        if w.isVisible { w.orderOut(nil) } else { showNearTray() }
     }
-    
-    // Position the window exactly below the tray icon
-    func showWindowNearTray() {
-        guard let window = self.window else { return }
-        
-        if let statusButton = statusItem?.button, let windowFrame = statusButton.window?.frame {
-            let screenFrame = NSScreen.main?.visibleFrame ?? NSRect.zero
-            let buttonOrigin = windowFrame.origin
-            
-            // If the status item is not yet positioned in the menu bar at the top of the screen,
-            // retry after a small delay instead of showing it in the wrong place.
-            if buttonOrigin.y < screenFrame.maxY - 120 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                    self?.showWindowNearTray()
-                }
+
+    func showNearTray() {
+        guard let w = window else { return }
+        if let btn = statusItem?.button, let wf = btn.window?.frame {
+            let sf = NSScreen.main?.visibleFrame ?? .zero
+            if wf.origin.y < sf.maxY - 120 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.showNearTray() }
                 return
             }
-            
-            var x = buttonOrigin.x + (windowFrame.width / 2) - (window.frame.width / 2)
-            var y = buttonOrigin.y - window.frame.height - 5
-            
-            // Keep window on-screen bounds
-            if x + window.frame.width > screenFrame.maxX {
-                x = screenFrame.maxX - window.frame.width - 10
-            }
-            if x < screenFrame.minX {
-                x = screenFrame.minX + 10
-            }
-            if y < screenFrame.minY {
-                y = screenFrame.minY + 10
-            }
-            
-            window.setFrameOrigin(NSPoint(x: x, y: y))
-        } else {
-            window.center()
-        }
-        
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+            var x = wf.origin.x + wf.width / 2 - w.frame.width / 2
+            var y = wf.origin.y - w.frame.height - 5
+            x = max(sf.minX + 10, min(x, sf.maxX - w.frame.width - 10))
+            y = max(sf.minY + 10, y)
+            w.setFrameOrigin(NSPoint(x: x, y: y))
+        } else { w.center() }
+        w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
-    
-    // Handle Dock icon click: always show near the tray icon
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        guard let window = self.window else { return true }
-        if window.isVisible {
-            window.orderOut(nil)
-        } else {
-            showWindowNearTray()
-        }
+        guard let w = window else { return true }
+        if w.isVisible { w.orderOut(nil) } else { showNearTray() }
         return true
     }
 }
 
-// App entry point
+// MARK: - Entry Point
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

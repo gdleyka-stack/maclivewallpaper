@@ -65,10 +65,11 @@ class WallpaperPlayer {
     static let shared = WallpaperPlayer()
 
     private var wallpaperWindows: [NSWindow] = []
-    private var player: AVPlayer?
+    private var player: AVQueuePlayer?
+    private var playerLooper: AVPlayerLooper?
     private var playerLayers: [AVPlayerLayer] = []
     private var currentURL: URL?
-    private var loopObserver: Any?
+    private var rateObserver: NSKeyValueObservation?
 
     var soundEnabled: Bool = true {
         didSet {
@@ -97,20 +98,23 @@ class WallpaperPlayer {
         }
     }
 
-    func play(url: URL) {
-        if currentURL == url { stop(); return }
+    func play(url: URL, force: Bool = false) {
+        if !force && currentURL == url { stop(); return }
         stop()
         currentURL = url
         GalleryStore.saveActiveURL(url)
 
         let item = AVPlayerItem(url: url)
-        player = AVPlayer(playerItem: item)
+        let queuePlayer = AVQueuePlayer(playerItem: item)
+        player = queuePlayer
         player?.isMuted = !soundEnabled
+        
+        playerLooper = AVPlayerLooper(player: queuePlayer, templateItem: item)
 
         // Create a wallpaper window for every connected screen
         for screen in NSScreen.screens {
             let win = makeWallpaperWindow(for: screen)
-            let layer = AVPlayerLayer(player: player)
+            let layer = AVPlayerLayer(player: queuePlayer)
             layer.frame = win.contentView!.bounds
             layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
             layer.videoGravity = .resizeAspectFill
@@ -120,20 +124,20 @@ class WallpaperPlayer {
             playerLayers.append(layer)
         }
 
-        loopObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
-        ) { [weak self] _ in
-            self?.player?.seek(to: .zero)
-            self?.player?.play()
-            self?.player?.rate = self?.playbackRate ?? 1.0
+        // Keep custom playback speed when looper loops to next item replica
+        rateObserver = queuePlayer.observe(\.rate, options: [.new]) { [weak self] p, _ in
+            guard let self = self else { return }
+            if p.rate != self.playbackRate && p.rate != 0 {
+                p.rate = self.playbackRate
+            }
         }
 
         // Listen for screen changes
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
 
-        player?.play()
-        player?.rate = playbackRate
+        queuePlayer.play()
+        queuePlayer.rate = playbackRate
         
         DispatchQueue.main.async {
             if let delegate = NSApp.delegate as? AppDelegate {
@@ -143,9 +147,10 @@ class WallpaperPlayer {
     }
 
     func stop() {
-        if let obs = loopObserver { NotificationCenter.default.removeObserver(obs); loopObserver = nil }
+        rateObserver = nil
         NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
         player?.pause()
+        playerLooper = nil
         player = nil
         playerLayers.forEach { $0.removeFromSuperlayer() }
         playerLayers.removeAll()
@@ -163,7 +168,7 @@ class WallpaperPlayer {
 
     @objc private func screensChanged() {
         guard let url = currentURL else { return }
-        play(url: url)   // re-setup windows for new screen configuration
+        play(url: url, force: true)   // re-setup windows for new screen configuration
     }
 
     private func makeWallpaperWindow(for screen: NSScreen) -> NSWindow {

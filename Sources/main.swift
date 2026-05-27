@@ -76,9 +76,7 @@ class WallpaperPlayer {
             UserDefaults.standard.set(soundEnabled, forKey: "settings.sound")
         }
     }
-    var loopEnabled: Bool = true {
-        didSet { UserDefaults.standard.set(loopEnabled, forKey: "settings.loop") }
-    }
+
     var playbackRate: Float = 1.0 {
         didSet {
             player?.rate = playbackRate
@@ -93,9 +91,7 @@ class WallpaperPlayer {
         if d.object(forKey: "settings.sound") != nil {
             soundEnabled = d.bool(forKey: "settings.sound")
         }
-        if d.object(forKey: "settings.loop") != nil {
-            loopEnabled = d.bool(forKey: "settings.loop")
-        }
+
         if d.object(forKey: "settings.speed") != nil {
             playbackRate = d.float(forKey: "settings.speed")
         }
@@ -124,14 +120,12 @@ class WallpaperPlayer {
             playerLayers.append(layer)
         }
 
-        if loopEnabled {
-            loopObserver = NotificationCenter.default.addObserver(
-                forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
-            ) { [weak self] _ in
-                self?.player?.seek(to: .zero)
-                self?.player?.play()
-                self?.player?.rate = self?.playbackRate ?? 1.0
-            }
+        loopObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            self?.player?.seek(to: .zero)
+            self?.player?.play()
+            self?.player?.rate = self?.playbackRate ?? 1.0
         }
 
         // Listen for screen changes
@@ -140,6 +134,12 @@ class WallpaperPlayer {
 
         player?.play()
         player?.rate = playbackRate
+        
+        DispatchQueue.main.async {
+            if let delegate = NSApp.delegate as? AppDelegate {
+                delegate.updateTrayIcon()
+            }
+        }
     }
 
     func stop() {
@@ -153,6 +153,12 @@ class WallpaperPlayer {
         wallpaperWindows.removeAll()
         currentURL = nil
         GalleryStore.saveActiveURL(nil)
+        
+        DispatchQueue.main.async {
+            if let delegate = NSApp.delegate as? AppDelegate {
+                delegate.updateTrayIcon()
+            }
+        }
     }
 
     @objc private func screensChanged() {
@@ -175,16 +181,25 @@ class WallpaperPlayer {
 
 // MARK: - Tray Icon
 
-func createTrayIcon() -> NSImage {
-    if let img = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil) { return img }
+func createTrayIcon(isPlaying: Bool) -> NSImage {
+    let symbolName = isPlaying ? "pause.fill" : "play.fill"
+    if let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) { return img }
     let size = NSSize(width: 18, height: 18)
     let image = NSImage(size: size, flipped: false) { _ in
-        let path = NSBezierPath()
-        path.move(to: NSPoint(x: 6, y: 4))
-        path.line(to: NSPoint(x: 14, y: 9))
-        path.line(to: NSPoint(x: 6, y: 14))
-        path.close()
-        NSColor.black.setFill(); path.fill()
+        if isPlaying {
+            let path1 = NSRect(x: 5, y: 4, width: 3, height: 10)
+            let path2 = NSRect(x: 10, y: 4, width: 3, height: 10)
+            NSColor.black.setFill()
+            NSBezierPath(rect: path1).fill()
+            NSBezierPath(rect: path2).fill()
+        } else {
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: 6, y: 4))
+            path.line(to: NSPoint(x: 14, y: 9))
+            path.line(to: NSPoint(x: 6, y: 14))
+            path.close()
+            NSColor.black.setFill(); path.fill()
+        }
         return true
     }
     image.isTemplate = true
@@ -285,7 +300,6 @@ class TabBar: NSView {
 
 class SettingsView: NSView {
     private var soundToggle: NSSwitch?
-    private var loopToggle: NSSwitch?
     private var speedSlider: NSSlider?
     private var speedLabel: NSTextField?
 
@@ -294,7 +308,6 @@ class SettingsView: NSView {
 
     func syncToPlayer() {
         soundToggle?.state = WallpaperPlayer.shared.soundEnabled ? .on : .off
-        loopToggle?.state = WallpaperPlayer.shared.loopEnabled ? .on : .off
         speedSlider?.doubleValue = Double(WallpaperPlayer.shared.playbackRate)
         speedLabel?.stringValue = String(format: "%.2f×", WallpaperPlayer.shared.playbackRate)
     }
@@ -317,7 +330,7 @@ class SettingsView: NSView {
         var y = bounds.height
 
         // Sound
-        y -= 52
+        y -= 60
         let soundRow = row(y: y, h: 44, title: "Sound")
         let sndT = NSSwitch(frame: NSRect(x: W - 54, y: 11, width: 40, height: 22))
         sndT.state = wp.soundEnabled ? .on : .off
@@ -327,19 +340,8 @@ class SettingsView: NSView {
         addSubview(soundRow)
         soundToggle = sndT
 
-        // Loop
-        y -= 52
-        let loopRow = row(y: y, h: 44, title: "Loop")
-        let lpT = NSSwitch(frame: NSRect(x: W - 54, y: 11, width: 40, height: 22))
-        lpT.state = wp.loopEnabled ? .on : .off
-        lpT.target = self
-        lpT.action = #selector(loopToggled(_:))
-        loopRow.addSubview(lpT)
-        addSubview(loopRow)
-        loopToggle = lpT
-
         // Speed
-        y -= 72
+        y -= 80
         let speedRow = row(y: y, h: 64, title: "Playback Speed", titleY: 38)
         let lbl = NSTextField(labelWithString: String(format: "%.2f×", wp.playbackRate))
         lbl.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
@@ -360,10 +362,6 @@ class SettingsView: NSView {
 
     @objc private func soundToggled(_ s: NSSwitch) {
         WallpaperPlayer.shared.soundEnabled = (s.state == .on)
-    }
-
-    @objc private func loopToggled(_ s: NSSwitch) {
-        WallpaperPlayer.shared.loopEnabled = (s.state == .on)
     }
 
     @objc private func speedChanged(_ s: NSSlider) {
@@ -408,7 +406,9 @@ class GalleryCardView: NSView {
     private let deleteBtn: CardIconButton
     private let finderBtn: CardIconButton
     private let playingOverlay = NSView()
+    private let playingImageView = NSImageView()
     private(set) var isPlaying = false
+    private var isHovered = false
 
     init(frame: NSRect, item: GalleryView.GalleryItem) {
         self.item = item
@@ -456,12 +456,13 @@ class GalleryCardView: NSView {
         ve.layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
         playingOverlay.addSubview(ve)
 
-        if let iv = NSImageView(frame: NSRect(x: 10, y: 9, width: 18, height: 18)) as NSImageView? {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
-            iv.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
-            iv.image?.isTemplate = true; iv.contentTintColor = .white
-            ve.addSubview(iv)
-        }
+        playingImageView.frame = NSRect(x: 10, y: 9, width: 18, height: 18)
+        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        playingImageView.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
+        playingImageView.image?.isTemplate = true
+        playingImageView.contentTintColor = .white
+        ve.addSubview(playingImageView)
+        
         addSubview(playingOverlay)
 
         // Hover buttons
@@ -474,7 +475,24 @@ class GalleryCardView: NSView {
 
     func setPlaying(_ on: Bool) {
         isPlaying = on
-        NSAnimationContext.runAnimationGroup { $0.duration = 0.2; playingOverlay.animator().alphaValue = on ? 1 : 0 }
+        updateOverlayState()
+    }
+
+    private func updateOverlayState() {
+        let showOverlay = isPlaying || isHovered
+        let symbolName = isPlaying ? "pause.fill" : "play.fill"
+        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        playingImageView.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
+        playingImageView.image?.isTemplate = true
+        playingImageView.contentTintColor = .white
+        
+        let xOffset: CGFloat = (symbolName == "play.fill") ? 10 : 9
+        playingImageView.frame = NSRect(x: xOffset, y: 9, width: 18, height: 18)
+        
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.2
+            playingOverlay.animator().alphaValue = showOverlay ? 1.0 : 0.0
+        }
     }
 
     @objc private func delTapped() { onDelete?() }
@@ -488,11 +506,15 @@ class GalleryCardView: NSView {
     }
     override func mouseEntered(with e: NSEvent) {
         super.mouseEntered(with: e)
+        isHovered = true
+        updateOverlayState()
         NSAnimationContext.runAnimationGroup { $0.duration = 0.15
             deleteBtn.animator().alphaValue = 1; finderBtn.animator().alphaValue = 1 }
     }
     override func mouseExited(with e: NSEvent) {
         super.mouseExited(with: e)
+        isHovered = false
+        updateOverlayState()
         NSAnimationContext.runAnimationGroup { $0.duration = 0.15
             deleteBtn.animator().alphaValue = 0; finderBtn.animator().alphaValue = 0 }
     }
@@ -694,7 +716,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let btn = statusItem?.button {
-            btn.image = createTrayIcon()
+            btn.image = createTrayIcon(isPlaying: false)
             btn.action = #selector(trayClicked(_:)); btn.target = self
         }
         setupWindow()
@@ -758,6 +780,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func trayClicked(_ sender: AnyObject?) { toggleWindow() }
     @objc func quitClicked(_ sender: AnyObject?) { NSApp.terminate(nil) }
+
+    func updateTrayIcon() {
+        if let btn = statusItem?.button {
+            btn.image = createTrayIcon(isPlaying: WallpaperPlayer.shared.nowPlayingURL != nil)
+        }
+    }
 
     func toggleWindow() {
         guard let w = window else { return }

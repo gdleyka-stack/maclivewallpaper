@@ -14,9 +14,10 @@ all: $(APP_BUNDLE)
 $(APP_BUNDLE): Sources/main.swift Resources/Info.plist
 	@mkdir -p $(MACOS_DIR)
 	@mkdir -p $(RESOURCES_DIR)
-	swiftc $(SWIFT_FLAGS) -o $(MACOS_DIR)/$(APP_NAME) Sources/main.swift
+	swiftc $(SWIFT_FLAGS) -O -o $(MACOS_DIR)/$(APP_NAME) Sources/main.swift
 	cp Resources/Info.plist $(CONTENTS_DIR)/Info.plist
 	cp Resources/app_icon.webp $(RESOURCES_DIR)/app_icon.webp
+	cp Resources/AppIcon.icns $(RESOURCES_DIR)/AppIcon.icns
 	@echo "Built successfully at $(APP_BUNDLE)"
 
 run: all

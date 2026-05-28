@@ -70,6 +70,8 @@ class WallpaperPlayer {
     private var playerLayers: [AVPlayerLayer] = []
     private var currentURL: URL?
     private var rateObserver: NSKeyValueObservation?
+    private var statusObserver: NSKeyValueObservation?
+    private var keepAliveTimer: Timer?
 
     var soundEnabled: Bool = true {
         didSet {
@@ -99,15 +101,23 @@ class WallpaperPlayer {
     }
 
     func play(url: URL, force: Bool = false) {
-        if !force && currentURL == url { stop(); return }
+        // If same URL and not forced – just ensure it's playing (don't stop)
+        if !force && currentURL == url {
+            if let p = player, p.timeControlStatus != .playing {
+                p.play()
+                p.rate = playbackRate
+            }
+            return
+        }
         stop()
         currentURL = url
         GalleryStore.saveActiveURL(url)
 
         let item = AVPlayerItem(url: url)
         let queuePlayer = AVQueuePlayer(playerItem: item)
+        queuePlayer.isMuted = !soundEnabled
+        queuePlayer.automaticallyWaitsToMinimizeStalling = false
         player = queuePlayer
-        player?.isMuted = !soundEnabled
         
         playerLooper = AVPlayerLooper(player: queuePlayer, templateItem: item)
 
@@ -125,11 +135,41 @@ class WallpaperPlayer {
         }
 
         // Keep custom playback speed when looper loops to next item replica
-        rateObserver = queuePlayer.observe(\.rate, options: [.new]) { [weak self] p, _ in
+        rateObserver = queuePlayer.observe(\.rate, options: [.new]) { [weak self] p, change in
             guard let self = self else { return }
-            if p.rate != self.playbackRate && p.rate != 0 {
+            let newRate = change.newValue ?? p.rate
+            // Only correct non-zero rates that don't match desired speed
+            if newRate != 0 && newRate != self.playbackRate {
                 p.rate = self.playbackRate
             }
+        }
+
+        // Observe timeControlStatus to auto-recover from unexpected pauses
+        statusObserver = queuePlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
+            guard let self = self else { return }
+            if p.timeControlStatus == .paused, self.currentURL != nil {
+                // Small delay to avoid fighting with intentional stops
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self, weak p] in
+                    guard let self = self, let p = p, self.currentURL != nil else { return }
+                    if p.timeControlStatus == .paused {
+                        p.play()
+                        p.rate = self.playbackRate
+                    }
+                }
+            }
+        }
+
+        // Periodic keep-alive: nudge player if unexpectedly stopped
+        keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self = self, let p = self.player, self.currentURL != nil else { return }
+            if p.timeControlStatus == .paused {
+                p.play()
+                p.rate = self.playbackRate
+            }
+        }
+        // Allow timer to fire even when runloop is in event-tracking mode
+        if let timer = keepAliveTimer {
+            RunLoop.main.add(timer, forMode: .common)
         }
 
         // Listen for screen changes
@@ -147,7 +187,10 @@ class WallpaperPlayer {
     }
 
     func stop() {
+        keepAliveTimer?.invalidate()
+        keepAliveTimer = nil
         rateObserver = nil
+        statusObserver = nil
         NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
         player?.pause()
         playerLooper = nil
@@ -164,6 +207,13 @@ class WallpaperPlayer {
                 delegate.updateTrayIcon()
             }
         }
+    }
+
+    /// Nudge the player to resume if it paused unexpectedly (e.g., after window focus change).
+    func ensurePlaying() {
+        guard let p = player, currentURL != nil, p.timeControlStatus == .paused else { return }
+        p.play()
+        p.rate = playbackRate
     }
 
     @objc private func screensChanged() {
@@ -796,7 +846,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let w = window else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if now - w.lastResignTime < 0.25 { return }
-        if w.isVisible { w.orderOut(nil) } else { showNearTray() }
+        if w.isVisible {
+            w.orderOut(nil)
+        } else {
+            // Ensure playback is running before showing UI (window focus can sometimes cause a brief stall)
+            WallpaperPlayer.shared.ensurePlaying()
+            showNearTray()
+        }
     }
 
     func showNearTray() {

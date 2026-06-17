@@ -25,7 +25,7 @@ extension NSImage {
     }
 }
 
-// MARK: - Persistence
+
 
 struct GalleryStore {
     static let itemsKey = "gallery.items"
@@ -59,7 +59,7 @@ struct GalleryStore {
     }
 }
 
-// MARK: - Wallpaper Player (multi-screen)
+
 
 class WallpaperPlayer {
     static let shared = WallpaperPlayer()
@@ -101,7 +101,7 @@ class WallpaperPlayer {
     }
 
     func play(url: URL, force: Bool = false) {
-        // If same URL and not forced – just ensure it's playing (don't stop)
+        
         if !force && currentURL == url {
             if let p = player, p.timeControlStatus != .playing {
                 p.play()
@@ -121,7 +121,7 @@ class WallpaperPlayer {
         
         playerLooper = AVPlayerLooper(player: queuePlayer, templateItem: item)
 
-        // Create a wallpaper window for every connected screen
+        
         for screen in NSScreen.screens {
             let win = makeWallpaperWindow(for: screen)
             let layer = AVPlayerLayer(player: queuePlayer)
@@ -134,21 +134,21 @@ class WallpaperPlayer {
             playerLayers.append(layer)
         }
 
-        // Keep custom playback speed when looper loops to next item replica
+        
         rateObserver = queuePlayer.observe(\.rate, options: [.new]) { [weak self] p, change in
             guard let self = self else { return }
             let newRate = change.newValue ?? p.rate
-            // Only correct non-zero rates that don't match desired speed
+            
             if newRate != 0 && newRate != self.playbackRate {
                 p.rate = self.playbackRate
             }
         }
 
-        // Observe timeControlStatus to auto-recover from unexpected pauses
+        
         statusObserver = queuePlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
             guard let self = self else { return }
             if p.timeControlStatus == .paused, self.currentURL != nil {
-                // Small delay to avoid fighting with intentional stops
+                
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self, weak p] in
                     guard let self = self, let p = p, self.currentURL != nil else { return }
                     if p.timeControlStatus == .paused {
@@ -159,7 +159,7 @@ class WallpaperPlayer {
             }
         }
 
-        // Periodic keep-alive: nudge player if unexpectedly stopped
+        
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self = self, let p = self.player, self.currentURL != nil else { return }
             if p.timeControlStatus == .paused {
@@ -167,12 +167,12 @@ class WallpaperPlayer {
                 p.rate = self.playbackRate
             }
         }
-        // Allow timer to fire even when runloop is in event-tracking mode
+        
         if let timer = keepAliveTimer {
             RunLoop.main.add(timer, forMode: .common)
         }
 
-        // Listen for screen changes
+        
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
 
@@ -209,7 +209,7 @@ class WallpaperPlayer {
         }
     }
 
-    /// Nudge the player to resume if it paused unexpectedly (e.g., after window focus change).
+    
     func ensurePlaying() {
         guard let p = player, currentURL != nil, p.timeControlStatus == .paused else { return }
         p.play()
@@ -218,7 +218,7 @@ class WallpaperPlayer {
 
     @objc private func screensChanged() {
         guard let url = currentURL else { return }
-        play(url: url, force: true)   // re-setup windows for new screen configuration
+        play(url: url, force: true)   
     }
 
     private func makeWallpaperWindow(for screen: NSScreen) -> NSWindow {
@@ -234,7 +234,7 @@ class WallpaperPlayer {
     }
 }
 
-// MARK: - Tray Icon
+
 
 func createTrayIcon(isPlaying: Bool) -> NSImage {
     let symbolName = isPlaying ? "pause.fill" : "play.fill"
@@ -261,7 +261,7 @@ func createTrayIcon(isPlaying: Bool) -> NSImage {
     return image
 }
 
-// MARK: - Quit Button
+
 
 class RedQuitButton: NSButton {
     private var trackingArea: NSTrackingArea?
@@ -285,9 +285,9 @@ class RedQuitButton: NSButton {
         layer?.backgroundColor = NSColor(red: 0.85, green: 0.15, blue: 0.15, alpha: 0.9).cgColor }
 }
 
-// Custom Toggle Switch removed; using standard NSSwitch
 
-// MARK: - Custom Tab Bar (two pill buttons, not segment)
+
+
 
 class TabBar: NSView {
     var selectedIndex: Int = 0 { didSet { updateSelection(animated: true) } }
@@ -351,7 +351,7 @@ class TabBar: NSView {
     }
 }
 
-// MARK: - Settings View
+
 
 class SettingsView: NSView {
     private var soundToggle: NSSwitch?
@@ -384,7 +384,7 @@ class SettingsView: NSView {
         let wp = WallpaperPlayer.shared
         var y = bounds.height
 
-        // Sound
+        
         y -= 60
         let soundRow = row(y: y, h: 44, title: "Sound")
         let sndT = NSSwitch(frame: NSRect(x: W - 54, y: 11, width: 40, height: 22))
@@ -395,7 +395,7 @@ class SettingsView: NSView {
         addSubview(soundRow)
         soundToggle = sndT
 
-        // Speed
+        
         y -= 80
         let speedRow = row(y: y, h: 64, title: "Playback Speed", titleY: 38)
         let lbl = NSTextField(labelWithString: String(format: "%.2f×", wp.playbackRate))
@@ -425,7 +425,7 @@ class SettingsView: NSView {
     }
 }
 
-// MARK: - Card Icon Button (square)
+
 
 class CardIconButton: NSButton {
     private var trackingArea: NSTrackingArea?
@@ -450,7 +450,7 @@ class CardIconButton: NSButton {
         NSCursor.arrow.set(); layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor }
 }
 
-// MARK: - Gallery Card
+
 
 class GalleryCardView: NSView {
     private var tracking: NSTrackingArea?
@@ -485,7 +485,7 @@ class GalleryCardView: NSView {
             g.startPoint = CGPoint(x: 0, y: 0); g.endPoint = CGPoint(x: 1, y: 1)
             layer?.addSublayer(g)
         }
-        // Title bar
+        
         let tb = NSView(frame: NSRect(x: 0, y: 0, width: bounds.width, height: 28))
         tb.wantsLayer = true; tb.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.4).cgColor
         let lbl = NSTextField(labelWithString: item.title)
@@ -494,7 +494,7 @@ class GalleryCardView: NSView {
         lbl.frame = NSRect(x: 4, y: 5, width: bounds.width - 8, height: 16)
         tb.addSubview(lbl); addSubview(tb)
 
-        // Now-playing badge
+        
         let bw: CGFloat = 36
         playingOverlay.frame = NSRect(x: CGFloat(Int((bounds.width - bw) / 2)), y: CGFloat(Int((bounds.height - bw) / 2)), width: bw, height: bw)
         playingOverlay.wantsLayer = true; playingOverlay.layer?.cornerRadius = bw / 2
@@ -520,7 +520,7 @@ class GalleryCardView: NSView {
         
         addSubview(playingOverlay)
 
-        // Hover buttons
+        
         [deleteBtn, finderBtn].forEach { $0.alphaValue = 0 }
         deleteBtn.target = self; deleteBtn.action = #selector(delTapped)
         finderBtn.target = self; finderBtn.action = #selector(finderTapped)
@@ -575,7 +575,7 @@ class GalleryCardView: NSView {
     }
 }
 
-// MARK: - Gallery View
+
 
 class GalleryView: NSView {
     struct GalleryItem {
@@ -607,7 +607,7 @@ class GalleryView: NSView {
     func loadSavedItems() {
         let urls = GalleryStore.loadItems()
         for url in urls {
-            // Using bookmarks so we bypass fileExists(atPath:) issues where paths get sandbox-blocked
+            
             let thumb = makeThumbnail(url: url)
             let colors = randomColors()
             items.append(GalleryItem(title: url.lastPathComponent, colors: colors, videoURL: url, thumbnail: thumb))
@@ -696,7 +696,7 @@ class GalleryView: NSView {
     }
 }
 
-// MARK: - Minimal Add Button
+
 
 class MinimalAddButton: NSButton {
     private var tracking: NSTrackingArea?
@@ -736,7 +736,7 @@ class MinimalAddButton: NSButton {
     }
 }
 
-// MARK: - Main Window
+
 
 class MainWindow: NSPanel, NSWindowDelegate {
     var lastResignTime: TimeInterval = 0
@@ -752,7 +752,7 @@ class MainWindow: NSPanel, NSWindowDelegate {
     }
 }
 
-// MARK: - App Delegate
+
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
@@ -761,7 +761,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var galleryView: GalleryView?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Set Dock Icon dynamically
+        
         if let iconURL = Bundle.main.url(forResource: "app_icon", withExtension: "webp"),
            let image = NSImage(contentsOf: iconURL) {
             NSApp.applicationIconImage = image.croppedToSquare() ?? image
@@ -780,7 +780,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             self.galleryView?.loadSavedItems()
-            // Auto-restore last wallpaper
+            
             if let url = GalleryStore.loadActiveURL() {
                 WallpaperPlayer.shared.play(url: url)
                 self.galleryView?.refreshPlayingState()
@@ -799,17 +799,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         fx.wantsLayer = true; fx.layer?.cornerRadius = 18; fx.layer?.masksToBounds = true
         panel.contentView?.addSubview(fx)
 
-        // Tab bar
+        
         let tabs = TabBar(frame: NSRect(x: 20, y: H - 62, width: W - 40, height: 34))
         tabs.changed = { [weak self] i in self?.switchTab(i) }
         fx.addSubview(tabs)
 
-        // Divider
+        
         let div = NSView(frame: NSRect(x: 20, y: H - 68, width: W - 40, height: 1))
         div.wantsLayer = true; div.layer?.backgroundColor = NSColor.separatorColor.cgColor
         fx.addSubview(div)
 
-        // Content
+        
         let container = NSView(frame: NSRect(x: 20, y: 72, width: W - 40, height: H - 68 - 72 - 4))
         fx.addSubview(container)
 
@@ -819,7 +819,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         container.addSubview(settings); container.addSubview(gallery)
         settingsView = settings; galleryView = gallery
 
-        // Quit button
+        
         let quit = RedQuitButton(frame: NSRect(x: 20, y: 20, width: W - 40, height: 40))
         quit.target = self; quit.action = #selector(quitClicked(_:))
         fx.addSubview(quit)
@@ -849,7 +849,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if w.isVisible {
             w.orderOut(nil)
         } else {
-            // Ensure playback is running before showing UI (window focus can sometimes cause a brief stall)
+            
             WallpaperPlayer.shared.ensurePlaying()
             showNearTray()
         }
@@ -879,7 +879,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// MARK: - Entry Point
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

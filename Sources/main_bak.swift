@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-// Custom vector drawing for the tray status item (monitor outline)
+
 func createTrayIcon() -> NSImage {
     let size = NSSize(width: 18, height: 18)
     let image = NSImage(size: size, flipped: false) { rect in
@@ -27,20 +27,20 @@ func createTrayIcon() -> NSImage {
         
         return true
     }
-    image.isTemplate = true // Allows auto-coloring in dark/light mode menu bar
+    image.isTemplate = true 
     return image
 }
 
-// Custom vector drawing for the control panel icon (monitor with mountains and sun)
+
 func createLargeIcon() -> NSImage {
     let size = NSSize(width: 80, height: 80)
     let image = NSImage(size: size, flipped: false) { rect in
-        // Background glow
+        
         let bgPath = NSBezierPath(ovalIn: rect.insetBy(dx: 2, dy: 2))
         NSColor.systemBlue.withAlphaComponent(0.12).setFill()
         bgPath.fill()
         
-        // Monitor body
+        
         let monitorWidth: CGFloat = 52
         let monitorHeight: CGFloat = 36
         let monitorRect = NSRect(
@@ -54,7 +54,7 @@ func createLargeIcon() -> NSImage {
         screenPath.lineWidth = 2.5
         screenPath.stroke()
         
-        // Stand
+        
         let standPath = NSBezierPath()
         standPath.move(to: NSPoint(x: size.width / 2, y: monitorRect.minY))
         standPath.line(to: NSPoint(x: size.width / 2, y: monitorRect.minY - 8))
@@ -64,17 +64,17 @@ func createLargeIcon() -> NSImage {
         standPath.lineCapStyle = .round
         standPath.stroke()
         
-        // Landscape scene inside screen (clipped)
+        
         let clipPath = NSBezierPath(roundedRect: monitorRect.insetBy(dx: 2, dy: 2), xRadius: 2, yRadius: 2)
         NSGraphicsContext.current?.saveGraphicsState()
         clipPath.addClip()
         
-        // Sun
+        
         let sunPath = NSBezierPath(ovalIn: NSRect(x: monitorRect.minX + 30, y: monitorRect.minY + 18, width: 10, height: 10))
         NSColor.systemOrange.withAlphaComponent(0.85).setFill()
         sunPath.fill()
         
-        // Mountains
+        
         let mountainPath = NSBezierPath()
         mountainPath.move(to: NSPoint(x: monitorRect.minX, y: monitorRect.minY))
         mountainPath.line(to: NSPoint(x: monitorRect.minX + 16, y: monitorRect.minY + 16))
@@ -93,7 +93,7 @@ func createLargeIcon() -> NSImage {
     return image
 }
 
-// Custom button with hover effect and white text
+
 class RedQuitButton: NSButton {
     private var trackingArea: NSTrackingArea?
     
@@ -146,7 +146,7 @@ class RedQuitButton: NSButton {
     }
 }
 
-// Custom panel acting as a floating popup window
+
 class MainWindow: NSPanel, NSWindowDelegate {
     var lastResignTime: TimeInterval = 0
     
@@ -183,7 +183,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var window: MainWindow?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Create the status bar item (tray)
+        
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
             button.image = createTrayIcon()
@@ -193,11 +193,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         setupWindow()
         
-        // Ensure it runs as a foreground app showing in Dock
+        
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         
-        // Position window near tray initially
+        
         showWindowNearTray()
     }
     
@@ -207,7 +207,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         let panel = MainWindow(contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight))
         
-        // Vibrancy (frosted glass) background
+        
         let visualEffect = NSVisualEffectView(frame: panel.contentView!.bounds)
         visualEffect.autoresizingMask = [.width, .height]
         visualEffect.state = .active
@@ -218,12 +218,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         visualEffect.layer?.masksToBounds = true
         panel.contentView?.addSubview(visualEffect)
         
-        // Custom graphic icon instead of emoji
+        
         let imageView = NSImageView(frame: NSRect(x: (windowWidth - 80) / 2, y: windowHeight - 95, width: 80, height: 80))
         imageView.image = createLargeIcon()
         visualEffect.addSubview(imageView)
         
-        // Header Title
+        
         let titleLabel = NSTextField(labelWithString: "Live Wallpaper")
         titleLabel.font = NSFont.systemFont(ofSize: 18, weight: .bold)
         titleLabel.textColor = .labelColor
@@ -231,7 +231,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         titleLabel.frame = NSRect(x: 20, y: windowHeight - 122, width: windowWidth - 40, height: 25)
         visualEffect.addSubview(titleLabel)
         
-        // Header Subtitle
+        
         let subtitleLabel = NSTextField(labelWithString: "macOS Control Utility")
         subtitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
         subtitleLabel.textColor = .secondaryLabelColor
@@ -239,14 +239,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         subtitleLabel.frame = NSRect(x: 20, y: windowHeight - 140, width: windowWidth - 40, height: 18)
         visualEffect.addSubview(subtitleLabel)
         
-        // Central Info Box
+        
         let box = NSView(frame: NSRect(x: 20, y: 80, width: windowWidth - 40, height: windowHeight - 235))
         box.wantsLayer = true
         box.layer?.cornerRadius = 12
         box.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.04).cgColor
         visualEffect.addSubview(box)
         
-        // Info Box Label
+        
         let statusTitle = NSTextField(labelWithString: "STATUS")
         statusTitle.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
         statusTitle.textColor = .secondaryLabelColor
@@ -268,7 +268,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         subText.frame = NSRect(x: 10, y: box.bounds.height / 2 - 30, width: box.bounds.width - 20, height: 20)
         box.addSubview(subText)
         
-        // Red Quit Button
+        
         let quitButton = RedQuitButton(frame: NSRect(x: 20, y: 20, width: windowWidth - 40, height: 40))
         quitButton.target = self
         quitButton.action = #selector(quitClicked(_:))
@@ -289,7 +289,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let window = self.window else { return }
         
         let now = ProcessInfo.processInfo.systemUptime
-        // Avoid reopening immediately if it was closed via loss of focus
+        
         if now - window.lastResignTime < 0.25 {
             return
         }
@@ -301,7 +301,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
-    // Position the window exactly below the tray icon
+    
     func showWindowNearTray() {
         guard let window = self.window else { return }
         
@@ -312,7 +312,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             var x = buttonOrigin.x + (windowFrame.width / 2) - (window.frame.width / 2)
             var y = buttonOrigin.y - window.frame.height - 5
             
-            // Keep window on-screen bounds
+            
             if x + window.frame.width > screenFrame.maxX {
                 x = screenFrame.maxX - window.frame.width - 10
             }
@@ -332,7 +332,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     
-    // Handle Dock icon click: always show near the tray icon
+    
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         guard let window = self.window else { return true }
         if window.isVisible {
@@ -344,7 +344,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// App entry point
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

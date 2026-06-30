@@ -18,6 +18,7 @@ $(APP_BUNDLE): Sources/main.swift Resources/Info.plist
 	cp Resources/Info.plist $(CONTENTS_DIR)/Info.plist
 	cp Resources/app_icon.webp $(RESOURCES_DIR)/app_icon.webp
 	cp Resources/AppIcon.icns $(RESOURCES_DIR)/AppIcon.icns
+	cp -R starterpack $(RESOURCES_DIR)/starterpack
 	@echo "Built successfully at $(APP_BUNDLE)"
 
 run: all

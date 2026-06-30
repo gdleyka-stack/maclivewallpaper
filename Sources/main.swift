@@ -40,7 +40,21 @@ struct GalleryStore {
     }
 
     static func loadItems() -> [URL] {
-        guard let bookmarks = UserDefaults.standard.array(forKey: itemsKey) as? [Data] else { return [] }
+        var bookmarks = UserDefaults.standard.array(forKey: itemsKey) as? [Data] ?? []
+        
+        let hasLoaded = UserDefaults.standard.bool(forKey: "hasLoadedStarterpackV1")
+        if !hasLoaded && bookmarks.isEmpty {
+            UserDefaults.standard.set(true, forKey: "hasLoadedStarterpackV1")
+            if let bundlePath = Bundle.main.resourceURL?.appendingPathComponent("starterpack"),
+               let urls = try? FileManager.default.contentsOfDirectory(at: bundlePath, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) {
+                let videoURLs = urls.filter { ["mp4", "mov", "m4v"].contains($0.pathExtension.lowercased()) }
+                
+                let newBookmarks = videoURLs.compactMap { try? $0.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) }
+                bookmarks.append(contentsOf: newBookmarks)
+                UserDefaults.standard.set(bookmarks, forKey: itemsKey)
+            }
+        }
+        
         var isStale = false
         return bookmarks.compactMap { data in
             return try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale)

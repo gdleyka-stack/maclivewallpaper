@@ -72,6 +72,7 @@ class WallpaperPlayer {
     private var rateObserver: NSKeyValueObservation?
     private var statusObserver: NSKeyValueObservation?
     private var keepAliveTimer: Timer?
+    var isManuallyPaused: Bool = false
 
     var soundEnabled: Bool = true {
         didSet {
@@ -104,11 +105,13 @@ class WallpaperPlayer {
         
         if !force && currentURL == url {
             if let p = player, p.timeControlStatus != .playing {
+                isManuallyPaused = false
                 p.play()
                 p.rate = playbackRate
             }
             return
         }
+        isManuallyPaused = false
         stop()
         currentURL = url
         GalleryStore.saveActiveURL(url)
@@ -147,10 +150,10 @@ class WallpaperPlayer {
         
         statusObserver = queuePlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
             guard let self = self else { return }
-            if p.timeControlStatus == .paused, self.currentURL != nil {
+            if p.timeControlStatus == .paused, self.currentURL != nil, !self.isManuallyPaused {
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self, weak p] in
-                    guard let self = self, let p = p, self.currentURL != nil else { return }
+                    guard let self = self, let p = p, self.currentURL != nil, !self.isManuallyPaused else { return }
                     if p.timeControlStatus == .paused {
                         p.play()
                         p.rate = self.playbackRate
@@ -161,7 +164,7 @@ class WallpaperPlayer {
 
         
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self = self, let p = self.player, self.currentURL != nil else { return }
+            guard let self = self, let p = self.player, self.currentURL != nil, !self.isManuallyPaused else { return }
             if p.timeControlStatus == .paused {
                 p.play()
                 p.rate = self.playbackRate
@@ -187,6 +190,7 @@ class WallpaperPlayer {
     }
 
     func stop() {
+        isManuallyPaused = false
         keepAliveTimer?.invalidate()
         keepAliveTimer = nil
         rateObserver = nil
@@ -211,9 +215,26 @@ class WallpaperPlayer {
 
     
     func ensurePlaying() {
-        guard let p = player, currentURL != nil, p.timeControlStatus == .paused else { return }
+        guard let p = player, currentURL != nil, p.timeControlStatus == .paused, !isManuallyPaused else { return }
         p.play()
         p.rate = playbackRate
+    }
+
+    func togglePause() {
+        guard let p = player else { return }
+        if p.timeControlStatus == .playing {
+            isManuallyPaused = true
+            p.pause()
+        } else {
+            isManuallyPaused = false
+            p.play()
+            p.rate = playbackRate
+        }
+        DispatchQueue.main.async {
+            if let delegate = NSApp.delegate as? AppDelegate {
+                delegate.updateTrayIcon()
+            }
+        }
     }
 
     @objc private func screensChanged() {
@@ -651,7 +672,8 @@ class GalleryView: NSView {
 
     func refreshPlayingState() {
         let nowURL = WallpaperPlayer.shared.nowPlayingURL
-        cards.forEach { $0.setPlaying($0.item.videoURL == nowURL && nowURL != nil) }
+        let isPlaying = !WallpaperPlayer.shared.isManuallyPaused
+        cards.forEach { $0.setPlaying($0.item.videoURL == nowURL && nowURL != nil && isPlaying) }
     }
 
     override func layout() {
@@ -674,7 +696,11 @@ class GalleryView: NSView {
             card.onTap = { [weak self] in
                 guard let self = self else { return }
                 if let url = self.items[idx].videoURL {
-                    WallpaperPlayer.shared.play(url: url)
+                    if WallpaperPlayer.shared.nowPlayingURL == url {
+                        WallpaperPlayer.shared.togglePause()
+                    } else {
+                        WallpaperPlayer.shared.play(url: url)
+                    }
                 }
                 self.refreshPlayingState()
             }
@@ -838,7 +864,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func updateTrayIcon() {
         if let btn = statusItem?.button {
-            btn.image = createTrayIcon(isPlaying: WallpaperPlayer.shared.nowPlayingURL != nil)
+            let isPlaying = WallpaperPlayer.shared.nowPlayingURL != nil && !WallpaperPlayer.shared.isManuallyPaused
+            btn.image = createTrayIcon(isPlaying: isPlaying)
         }
     }
 
